@@ -146,14 +146,20 @@ def main() -> int:
 
     sft_config = SFTConfig(**sft_kwargs)
 
-    trainer = SFTTrainer(
-        model=model,
-        tokenizer=tokenizer,
-        train_dataset=train_dataset,
-        eval_dataset=val_dataset,
-        args=sft_config,
-        dataset_text_field="text",
-    )
+    trainer_kwargs = {
+        "model": model,
+        "train_dataset": train_dataset,
+        "eval_dataset": val_dataset,
+        "args": sft_config,
+        "dataset_text_field": "text",
+    }
+    trainer_sig = inspect.signature(SFTTrainer.__init__)
+    if "tokenizer" in trainer_sig.parameters:
+        trainer_kwargs["tokenizer"] = tokenizer
+    elif "processing_class" in trainer_sig.parameters:
+        trainer_kwargs["processing_class"] = tokenizer
+
+    trainer = SFTTrainer(**trainer_kwargs)
 
     train_output = trainer.train()
     trainer.save_model(str(output_dir / "adapter"))
