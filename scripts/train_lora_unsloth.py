@@ -14,6 +14,7 @@ Expected dataset schema (one JSON object per line):
 from __future__ import annotations
 
 import argparse
+import inspect
 import os
 from pathlib import Path
 
@@ -120,24 +121,30 @@ def main() -> int:
             remove_columns=raw["validation"].column_names,
         )
 
-    sft_config = SFTConfig(
-        output_dir=str(output_dir),
-        max_seq_length=args.max_seq_length,
-        packing=False,
-        learning_rate=args.lr,
-        num_train_epochs=args.epochs,
-        per_device_train_batch_size=args.batch_size,
-        gradient_accumulation_steps=args.grad_accum,
-        warmup_ratio=args.warmup_ratio,
-        weight_decay=0.01,
-        lr_scheduler_type="cosine",
-        optim="adamw_8bit",
-        logging_steps=args.logging_steps,
-        save_steps=args.save_steps,
-        report_to=report_to,
-        run_name=args.wandb_run_name,
-        seed=args.seed,
-    )
+    sft_kwargs = {
+        "output_dir": str(output_dir),
+        "packing": False,
+        "learning_rate": args.lr,
+        "num_train_epochs": args.epochs,
+        "per_device_train_batch_size": args.batch_size,
+        "gradient_accumulation_steps": args.grad_accum,
+        "warmup_ratio": args.warmup_ratio,
+        "weight_decay": 0.01,
+        "lr_scheduler_type": "cosine",
+        "optim": "adamw_8bit",
+        "logging_steps": args.logging_steps,
+        "save_steps": args.save_steps,
+        "report_to": report_to,
+        "run_name": args.wandb_run_name,
+        "seed": args.seed,
+    }
+    sft_sig = inspect.signature(SFTConfig.__init__)
+    if "max_seq_length" in sft_sig.parameters:
+        sft_kwargs["max_seq_length"] = args.max_seq_length
+    elif "max_length" in sft_sig.parameters:
+        sft_kwargs["max_length"] = args.max_seq_length
+
+    sft_config = SFTConfig(**sft_kwargs)
 
     trainer = SFTTrainer(
         model=model,
