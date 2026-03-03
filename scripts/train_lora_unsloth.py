@@ -161,13 +161,22 @@ def main() -> int:
         "remove_unused_columns": False,
     }
 
-    if eval_ds is not None:
-        ta_kwargs["evaluation_strategy"] = "steps"
-        ta_kwargs["eval_steps"] = args.save_steps
-
     allowed = set(inspect.signature(TrainingArguments.__init__).parameters.keys())
+    if eval_ds is not None:
+        ta_kwargs["do_eval"] = True
+        ta_kwargs["eval_steps"] = args.save_steps
+        if "evaluation_strategy" in allowed:
+            ta_kwargs["evaluation_strategy"] = "steps"
+        elif "eval_strategy" in allowed:
+            ta_kwargs["eval_strategy"] = "steps"
+
     ta_kwargs = {k: v for k, v in ta_kwargs.items() if k in allowed}
     training_args = TrainingArguments(**ta_kwargs)
+    if eval_ds is not None:
+        strategy = getattr(training_args, "evaluation_strategy", None)
+        if strategy is None:
+            strategy = getattr(training_args, "eval_strategy", None)
+        print(f"Eval enabled. strategy={strategy} eval_steps={getattr(training_args, 'eval_steps', None)}")
 
     trainer = Trainer(
         model=model,
