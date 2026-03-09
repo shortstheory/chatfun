@@ -43,6 +43,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
     p.add_argument("--wandb-project", default="chatfun-lora", help="W&B project")
     p.add_argument("--wandb-run-name", default=None, help="W&B run name")
+    p.add_argument(
+        "--resume-from-checkpoint",
+        default=None,
+        help="Path to checkpoint directory to resume training from (e.g. .../checkpoint-7000)",
+    )
     return p.parse_args()
 
 
@@ -186,7 +191,7 @@ def main() -> int:
         data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
     )
 
-    train_output = trainer.train()
+    train_output = trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
     adapter_dir = output_dir / "adapter"
     trainer.save_model(str(adapter_dir))
     tokenizer.save_pretrained(str(adapter_dir))
