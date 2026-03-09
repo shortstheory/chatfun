@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Build chunked conversation datasets from parsed WhatsApp turns.
+"""Build chat fine-tuning datasets from parsed WhatsApp turns.
 
 Input: JSONL from parse_whatsapp.py (full format with timestamp/speaker/text)
-Output: train/val/test JSONL files using conversation chunks
+Output: train/val/test JSONL files using chunk or next-turn mode
 """
 
 from __future__ import annotations
@@ -25,9 +25,15 @@ class Turn:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build chunked train/val/test JSONL from parsed turns")
+    parser = argparse.ArgumentParser(description="Build train/val/test JSONL from parsed turns")
     parser.add_argument("--in", dest="input_path", required=True, help="Path to parsed turns JSONL (processed/turns.jsonl)")
     parser.add_argument("--out", dest="output_dir", required=True, help="Output directory for split JSONL files")
+    parser.add_argument(
+        "--mode",
+        choices=["chunk", "next_turn"],
+        default="next_turn",
+        help="Dataset mode: chunked continuation or single next-turn targets",
+    )
     parser.add_argument("--val-ratio", type=float, default=0.1, help="Validation split ratio (default: 0.1)")
     parser.add_argument("--test-ratio", type=float, default=0.1, help="Test split ratio (default: 0.1)")
     parser.add_argument("--chunk-turns", type=int, default=32, help="Turns per conversation chunk (default: 32)")
@@ -50,7 +56,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--speaker-control",
         action="store_true",
-        help="Add TARGET_SPEAKER=<name> control tag using the first completion turn speaker",
+        help="Add TARGET_SPEAKER=<name> control tag",
+    )
+    parser.add_argument(
+        "--first-name-only",
+        action="store_true",
+        help="Normalize speaker labels to first token (e.g., 'Mihir Parmar' -> 'Mihir')",
     )
     return parser.parse_args()
 
@@ -99,6 +110,28 @@ def load_turns(path: Path) -> list[Turn]:
 
 def format_turn(turn: Turn) -> str:
     return f"{turn.speaker}: {turn.text}"
+
+
+def first_name(name: str) -> str:
+    parts = name.strip().split()
+    return parts[0] if parts else name.strip()
+
+
+def normalize_turn_speakers(turns: list[Turn], first_name_only: bool) -> list[Turn]:
+    if not first_name_only:
+        return turns
+    normalized: list[Turn] = []
+    for turn in turns:
+        normalized.append(
+            Turn(
+                timestamp=turn.timestamp,
+                speaker=first_name(turn.speaker),
+                text=turn.text,
+                source_file=turn.source_file,
+                line_start=turn.line_start,
+            )
+        )
+    return normalized
 
 
 def iter_windows(turns: list[Turn], chunk_turns: int, stride: int, min_turns: int) -> Iterable[tuple[int, list[Turn]]]:
@@ -191,6 +224,62 @@ def build_examples(
     return examples
 
 
+def build_next_turn_examples(
+    turns: list[Turn],
+    prompt_turns: int,
+    stride: int,
+    system_prompt: str,
+    include_metadata: bool,
+    speaker_control: bool,
+) -> list[dict]:
+    examples: list[dict] = []
+    if len(turns) < 2:
+        return examples
+
+    for i in range(1, len(turns), stride):
+        target = turns[i]
+        start_idx = max(0, i - prompt_turns)
+        context = turns[start_idx:i]
+        if not context:
+            continue
+
+        context_text = "\n".join(format_turn(t) for t in context)
+        if speaker_control:
+            user_content = (
+                "Group chat transcript so far:\n"
+                f"{context_text}\n\n"
+                f"TARGET_SPEAKER={target.speaker}\n"
+                "Write exactly the next single message text from that speaker. Do not include speaker name."
+            )
+        else:
+            user_content = (
+                "Group chat transcript so far:\n"
+                f"{context_text}\n\n"
+                "Write exactly the next single message text in this conversation. Do not include speaker name."
+            )
+
+        record = {
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+                {"role": "assistant", "content": target.text},
+            ]
+        }
+        if include_metadata:
+            record["meta"] = {
+                "target_speaker": target.speaker,
+                "target_timestamp": target.timestamp,
+                "target_source_file": target.source_file,
+                "target_line_start": target.line_start,
+                "context_turns": len(context),
+                "start_turn_index": start_idx,
+                "target_turn_index": i,
+            }
+        examples.append(record)
+
+    return examples
+
+
 def split_counts(total: int, val_ratio: float, test_ratio: float) -> tuple[int, int, int]:
     test_n = int(total * test_ratio)
     val_n = int(total * val_ratio)
@@ -216,10 +305,13 @@ def main() -> int:
 
     if args.val_ratio < 0 or args.test_ratio < 0 or (args.val_ratio + args.test_ratio) >= 1:
         raise SystemExit("Invalid split ratios: require val_ratio >= 0, test_ratio >= 0, and val+test < 1")
-    if args.chunk_turns < 2 or args.prompt_turns < 1 or args.stride < 1 or args.min_turns < 2:
-        raise SystemExit("Invalid chunk settings: chunk_turns>=2, prompt_turns>=1, stride>=1, min_turns>=2")
-    if args.prompt_turns >= args.chunk_turns:
-        raise SystemExit("prompt_turns must be less than chunk_turns so assistant has completion turns")
+    if args.prompt_turns < 1 or args.stride < 1:
+        raise SystemExit("Invalid settings: prompt_turns>=1 and stride>=1")
+    if args.mode == "chunk":
+        if args.chunk_turns < 2 or args.min_turns < 2:
+            raise SystemExit("Invalid chunk settings: chunk_turns>=2 and min_turns>=2")
+        if args.prompt_turns >= args.chunk_turns:
+            raise SystemExit("prompt_turns must be less than chunk_turns so assistant has completion turns")
 
     input_path = Path(args.input_path)
     output_dir = Path(args.output_dir)
@@ -228,19 +320,32 @@ def main() -> int:
     turns = load_turns(input_path)
     if not turns:
         raise SystemExit("No valid turns found in input file")
+    turns = normalize_turn_speakers(turns, args.first_name_only)
 
-    examples = build_examples(
-        turns=turns,
-        chunk_turns=args.chunk_turns,
-        prompt_turns=args.prompt_turns,
-        stride=args.stride,
-        min_turns=args.min_turns,
-        system_prompt=args.system_prompt,
-        include_metadata=args.include_metadata,
-        speaker_control=args.speaker_control,
-    )
-    if not examples:
-        raise SystemExit("No chunked examples generated; check chunk settings")
+    if args.mode == "chunk":
+        examples = build_examples(
+            turns=turns,
+            chunk_turns=args.chunk_turns,
+            prompt_turns=args.prompt_turns,
+            stride=args.stride,
+            min_turns=args.min_turns,
+            system_prompt=args.system_prompt,
+            include_metadata=args.include_metadata,
+            speaker_control=args.speaker_control,
+        )
+        if not examples:
+            raise SystemExit("No chunked examples generated; check chunk settings")
+    else:
+        examples = build_next_turn_examples(
+            turns=turns,
+            prompt_turns=args.prompt_turns,
+            stride=args.stride,
+            system_prompt=args.system_prompt,
+            include_metadata=args.include_metadata,
+            speaker_control=args.speaker_control,
+        )
+        if not examples:
+            raise SystemExit("No next-turn examples generated; check prompt/stride settings")
 
     train_n, val_n, test_n = split_counts(len(examples), args.val_ratio, args.test_ratio)
 
@@ -260,11 +365,13 @@ def main() -> int:
     stats = {
         "input_turns": len(turns),
         "examples": len(examples),
+        "mode": args.mode,
         "chunk_turns": args.chunk_turns,
         "prompt_turns": args.prompt_turns,
         "stride": args.stride,
         "min_turns": args.min_turns,
         "speaker_control": args.speaker_control,
+        "first_name_only": args.first_name_only,
         "split": {"train": wrote_train, "val": wrote_val, "test": wrote_test},
         "ratios": {"val_ratio": args.val_ratio, "test_ratio": args.test_ratio},
     }
@@ -272,7 +379,8 @@ def main() -> int:
     stats_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
 
     print(f"Loaded turns: {len(turns)}")
-    print(f"Built chunked examples: {len(examples)}")
+    print(f"Mode: {args.mode}")
+    print(f"Built examples: {len(examples)}")
     print(f"Wrote train: {wrote_train} -> {train_path}")
     print(f"Wrote val:   {wrote_val} -> {val_path}")
     print(f"Wrote test:  {wrote_test} -> {test_path}")

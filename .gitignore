@@ -3,3 +3,4 @@ data/
 .DS_Store
 datasets/
 processed/
+datasets_next_turn/
