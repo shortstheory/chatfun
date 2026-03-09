@@ -41,6 +41,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stride", type=int, default=8, help="Sliding window stride in turns (default: 8)")
     parser.add_argument("--min-turns", type=int, default=12, help="Minimum turns required to keep a chunk (default: 12)")
     parser.add_argument(
+        "--require-full-context",
+        action="store_true",
+        help="In next_turn mode, keep only samples with full prompt-turns context",
+    )
+    parser.add_argument(
         "--system-prompt",
         default=(
             "You are simulating a friends group chat. Continue naturally with realistic speaker voices, "
@@ -231,6 +236,7 @@ def build_next_turn_examples(
     system_prompt: str,
     include_metadata: bool,
     speaker_control: bool,
+    require_full_context: bool,
 ) -> list[dict]:
     examples: list[dict] = []
     if len(turns) < 2:
@@ -240,6 +246,8 @@ def build_next_turn_examples(
         target = turns[i]
         start_idx = max(0, i - prompt_turns)
         context = turns[start_idx:i]
+        if require_full_context and len(context) < prompt_turns:
+            continue
         if not context:
             continue
 
@@ -343,6 +351,7 @@ def main() -> int:
             system_prompt=args.system_prompt,
             include_metadata=args.include_metadata,
             speaker_control=args.speaker_control,
+            require_full_context=args.require_full_context,
         )
         if not examples:
             raise SystemExit("No next-turn examples generated; check prompt/stride settings")
