@@ -14,7 +14,7 @@ from pathlib import Path
 
 import torch
 from datasets import load_dataset
-from transformers import DataCollatorForLanguageModeling, Trainer, TrainingArguments, set_seed
+from transformers import DataCollatorForSeq2Seq, Trainer, TrainingArguments, set_seed
 from unsloth import FastLanguageModel
 
 
@@ -98,11 +98,17 @@ def main() -> int:
         tokenizer.pad_token = tokenizer.eos_token
 
     def to_text(batch: dict) -> dict:
-        texts = [
-            tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-            for messages in batch["messages"]
-        ]
-        return {"text": texts}
+        prompt_texts = []
+        full_texts = []
+        for messages in batch["messages"]:
+            prompt_messages = messages[:-1]
+            prompt_texts.append(
+                tokenizer.apply_chat_template(prompt_messages, tokenize=False, add_generation_prompt=True)
+            )
+            full_texts.append(
+                tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+            )
+        return {"prompt_text": prompt_texts, "text": full_texts}
 
     text_train = raw["train"].map(
         to_text,
@@ -112,12 +118,26 @@ def main() -> int:
     )
 
     def tokenize_batch(batch: dict) -> dict:
-        return tokenizer(
+        full_tokens = tokenizer(
             batch["text"],
             truncation=True,
             max_length=args.max_seq_length,
             padding=False,
         )
+        prompt_tokens = tokenizer(
+            batch["prompt_text"],
+            truncation=True,
+            max_length=args.max_seq_length,
+            padding=False,
+        )
+
+        labels = []
+        for input_ids, prompt_ids in zip(full_tokens["input_ids"], prompt_tokens["input_ids"], strict=True):
+            prompt_len = min(len(prompt_ids), len(input_ids))
+            labels.append(([-100] * prompt_len) + input_ids[prompt_len:])
+
+        full_tokens["labels"] = labels
+        return full_tokens
 
     train_ds = text_train.map(
         tokenize_batch,
@@ -188,7 +208,7 @@ def main() -> int:
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=eval_ds,
-        data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
+        data_collator=DataCollatorForSeq2Seq(tokenizer=tokenizer, model=model, label_pad_token_id=-100),
     )
 
     train_output = trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
