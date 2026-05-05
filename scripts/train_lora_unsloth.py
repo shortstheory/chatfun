@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-dir", default="models/qwen25-7b-groupchat-lora", help="Output directory")
     p.add_argument("--max-seq-length", type=int, default=4096, help="Max sequence length")
     p.add_argument("--epochs", type=float, default=2.0, help="Train epochs")
-    p.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
+    p.add_argument("--lr", type=float, default=5e-5, help="Learning rate")
     p.add_argument("--batch-size", type=int, default=1, help="Per-device train batch size")
     p.add_argument("--eval-batch-size", type=int, default=1, help="Per-device eval batch size")
     p.add_argument("--grad-accum", type=int, default=8, help="Gradient accumulation steps")
@@ -36,7 +36,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lora-dropout", type=float, default=0.05, help="LoRA dropout")
     p.add_argument("--seed", type=int, default=3407, help="Random seed")
     p.add_argument("--save-steps", type=int, default=200, help="Save every N steps")
-    p.add_argument("--logging-steps", type=int, default=10, help="Log every N steps")
+    p.add_argument("--eval-steps", type=int, default=None, help="Evaluate every N steps (defaults to save_steps)")
+    p.add_argument("--logging-steps", type=int, default=1, help="Log every N steps")
     p.add_argument("--dataset-num-proc", type=int, default=4, help="Dataset map workers")
     p.add_argument("--load-in-4bit", action="store_true", help="Load model in 4-bit")
     p.add_argument("--no-load-in-4bit", action="store_true", help="Disable 4-bit load")
@@ -189,7 +190,7 @@ def main() -> int:
     allowed = set(inspect.signature(TrainingArguments.__init__).parameters.keys())
     if eval_ds is not None:
         ta_kwargs["do_eval"] = True
-        ta_kwargs["eval_steps"] = args.save_steps
+        ta_kwargs["eval_steps"] = args.eval_steps if args.eval_steps is not None else args.save_steps
         if "evaluation_strategy" in allowed:
             ta_kwargs["evaluation_strategy"] = "steps"
         elif "eval_strategy" in allowed:
