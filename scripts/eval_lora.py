@@ -11,6 +11,7 @@ from pathlib import Path
 
 import torch
 from peft import PeftModel
+from tqdm import tqdm
 from unsloth import FastLanguageModel
 
 
@@ -147,10 +148,11 @@ def evaluate_examples(
     out_path: Path,
     device: str,
     min_new_tokens: int,
-    max_new_tokens: int,
+    max_new_tokens: int | None,
     temperature: float,
     top_p: float,
     verbose: bool,
+    progress_desc: str,
 ) -> dict:
     total = 0
     exact_matches = 0
@@ -158,12 +160,16 @@ def evaluate_examples(
     token_f1_sum = 0.0
     reference_words = 0
     prediction_words = 0
-    total_examples = len(examples)
 
     with out_path.open("w", encoding="utf-8") as handle:
-        for index, example in enumerate(examples, start=1):
-            if not verbose:
-                print(f"\rProgress: {index}/{total_examples}", end="", flush=True)
+        iterator = tqdm(
+            enumerate(examples, start=1),
+            total=len(examples),
+            desc=progress_desc,
+            disable=False,
+            leave=True,
+        )
+        for index, example in iterator:
             messages = example["messages"]
             prompt_messages = messages[:-1]
             reference = str(messages[-1].get("content", "")).strip()
@@ -201,14 +207,11 @@ def evaluate_examples(
             }
             handle.write(json.dumps(result, ensure_ascii=False) + "\n")
             if verbose:
-                print(
+                tqdm.write(
                     f"[{index}/{len(examples)}] "
                     f"norm_em={result['normalized_exact_match']} "
                     f"token_f1={result['token_f1']:.3f}"
                 )
-
-    if not verbose:
-        print()
     return {
         "examples": total,
         "exact_match": exact_matches / total,
@@ -284,6 +287,7 @@ def main() -> int:
                 temperature=args.temperature,
                 top_p=args.top_p,
                 verbose=False,
+                progress_desc=target.name,
             )
             print_metrics(metrics)
             summary_rows.append({"target": str(target), **metrics})
@@ -317,6 +321,7 @@ def main() -> int:
         temperature=args.temperature,
         top_p=args.top_p,
         verbose=True,
+        progress_desc=Path(args.adapter).name,
     )
     print_metrics(metrics)
     return 0
