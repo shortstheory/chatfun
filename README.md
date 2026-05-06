@@ -122,6 +122,19 @@ Notes:
 - It reports exact match, normalized exact match, and token-level F1.
 - Add `--limit 20` for a quick smoke test before running the full split.
 
+Evaluate every checkpoint in one training run folder:
+
+```bash
+python3 scripts/eval_lora.py \
+  --model Qwen/Qwen2.5-7B-Instruct \
+  --model-dir models/qwen25-7b-groupchat-lora \
+  --test datasets/test.jsonl \
+  --out processed/eval_predictions.jsonl \
+  --load-in-4bit
+```
+
+This evaluates each `checkpoint-*` directory inside the run folder, plus `adapter/` if present, and prints a ranked summary table.
+
 ## 7. Run a local Telegram bot from your desktop
 
 Install bot deps:
