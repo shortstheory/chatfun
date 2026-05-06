@@ -18,6 +18,7 @@ from unsloth import FastLanguageModel
 
 try:
     from telegram import Update
+    from telegram.error import RetryAfter
     from telegram.constants import ChatAction
     from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 except ImportError as exc:  # pragma: no cover - import guard for friendlier setup errors
@@ -72,6 +73,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--load-in-4bit", action="store_true", help="Force 4-bit loading")
     parser.add_argument("--no-load-in-4bit", action="store_true", help="Disable 4-bit loading")
+    parser.add_argument(
+        "--group-send-delay",
+        type=float,
+        default=1.0,
+        help="Seconds to wait between streamed group messages to reduce Telegram flood control errors",
+    )
     return parser.parse_args()
 
 
@@ -360,6 +367,21 @@ def format_user_message(message_text: str, user_name: str | None) -> str:
     return f"{name}: {message_text.strip()}"
 
 
+async def send_message_with_retry(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    text: str,
+) -> None:
+    while True:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=text)
+            return
+        except RetryAfter as exc:
+            retry_after = float(exc.retry_after)
+            print(f"[telegram_bot] flood control hit chat_id={chat_id} retry_after_s={retry_after:.2f}", flush=True)
+            await asyncio.sleep(retry_after)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None or update.message.text is None:
         return
@@ -368,6 +390,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     lora_bot: LocalLoraBot = context.application.bot_data["lora_bot"]
     history_limit: int = context.application.bot_data["history_limit"]
     mode: str = context.application.bot_data["mode"]
+    group_send_delay: float = context.application.bot_data["group_send_delay"]
 
     chat_id = str(update.effective_chat.id)
     sender = update.effective_user.first_name if update.effective_user else None
@@ -386,12 +409,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         sent_count = 0
         async for response_message in lora_bot.stream_group_lines(history):
             store.append(chat_id, "assistant", response_message)
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=response_message)
+            await send_message_with_retry(context, update.effective_chat.id, response_message)
             sent_count += 1
             print(
                 f"[telegram_bot] streamed line chat_id={chat_id} line_index={sent_count} text={response_message!r}",
                 flush=True,
             )
+            if group_send_delay > 0:
+                await asyncio.sleep(group_send_delay)
         duration_s = time.perf_counter() - started_at
         print(
             f"[telegram_bot] replied chat_id={chat_id} messages={sent_count} duration_s={duration_s:.2f}",
@@ -406,16 +431,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     print(f"[telegram_bot] generated chat_id={chat_id} duration_s={duration_s:.2f} reply={reply!r}", flush=True)
 
     store.append(chat_id, "assistant", reply)
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=reply)
+    await send_message_with_retry(context, update.effective_chat.id, reply)
     print(f"[telegram_bot] replied chat_id={chat_id} messages=1", flush=True)
 
 
-def build_application(token: str, store: HistoryStore, lora_bot: LocalLoraBot, history_limit: int, mode: str) -> Application:
+def build_application(
+    token: str,
+    store: HistoryStore,
+    lora_bot: LocalLoraBot,
+    history_limit: int,
+    mode: str,
+    group_send_delay: float,
+) -> Application:
     application = Application.builder().token(token).build()
     application.bot_data["history_store"] = store
     application.bot_data["lora_bot"] = lora_bot
     application.bot_data["history_limit"] = history_limit
     application.bot_data["mode"] = mode
+    application.bot_data["group_send_delay"] = group_send_delay
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("reset", reset_command))
     application.add_handler(CommandHandler("help", help_command))
@@ -460,7 +493,14 @@ def main() -> int:
         system_prompt=system_prompt,
         mode=args.mode,
     )
-    application = build_application(args.telegram_token, store, lora_bot, args.history_limit, args.mode)
+    application = build_application(
+        args.telegram_token,
+        store,
+        lora_bot,
+        args.history_limit,
+        args.mode,
+        args.group_send_delay,
+    )
 
     print(f"[telegram_bot] starting long-polling mode={args.mode}", flush=True)
     application.run_polling(allowed_updates=Update.ALL_TYPES)
