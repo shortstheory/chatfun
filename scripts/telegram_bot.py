@@ -7,11 +7,13 @@ import argparse
 import asyncio
 import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
 import torch
 from peft import PeftModel
+from transformers import TextIteratorStreamer
 from unsloth import FastLanguageModel
 
 try:
@@ -119,6 +121,10 @@ def split_group_messages(reply: str) -> list[str]:
             continue
         messages.append(line)
     return messages or [reply]
+
+
+def sanitize_group_line(text: str) -> str:
+    return text.strip()
 
 
 class HistoryStore:
@@ -238,9 +244,78 @@ class LocalLoraBot:
             return sanitize_group_reply(decoded)
         return sanitize_reply(decoded)
 
+    def _stream_group_lines_sync(self, history: list[tuple[str, str]]) -> list[str]:
+        messages = build_messages(history, self.system_prompt)
+        prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = self.tokenizer([prompt], return_tensors="pt").to(self.device)
+        streamer = TextIteratorStreamer(
+            self.tokenizer,
+            skip_prompt=True,
+            skip_special_tokens=True,
+        )
+
+        generation_kwargs = {
+            **inputs,
+            "streamer": streamer,
+            "min_new_tokens": self.min_new_tokens,
+            "max_new_tokens": self.max_new_tokens,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "do_sample": True,
+            "pad_token_id": self.tokenizer.eos_token_id,
+        }
+
+        def run_generation() -> None:
+            with torch.no_grad():
+                self.model.generate(**generation_kwargs)
+
+        worker = threading.Thread(target=run_generation, daemon=True)
+        worker.start()
+
+        emitted_lines: list[str] = []
+        pending = ""
+        for chunk in streamer:
+            pending += chunk
+            while "\n" in pending:
+                raw_line, pending = pending.split("\n", 1)
+                line = sanitize_group_line(raw_line)
+                if line:
+                    emitted_lines.append(line)
+
+        worker.join()
+
+        tail = sanitize_group_line(pending)
+        if tail:
+            emitted_lines.append(tail)
+        return emitted_lines or ["Arnav: lol"]
+
     async def generate(self, history: list[tuple[str, str]]) -> str:
         async with self._lock:
             return await asyncio.to_thread(self._generate_sync, history)
+
+    async def stream_group_lines(self, history: list[tuple[str, str]]):
+        async with self._lock:
+            queue: asyncio.Queue[str | Exception | None] = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+
+            def worker() -> None:
+                try:
+                    for line in self._stream_group_lines_sync(history):
+                        loop.call_soon_threadsafe(queue.put_nowait, line)
+                except Exception as exc:  # pragma: no cover - runtime inference errors
+                    loop.call_soon_threadsafe(queue.put_nowait, exc)
+                finally:
+                    loop.call_soon_threadsafe(queue.put_nowait, None)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                yield item
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -297,19 +372,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     history = store.get_history(chat_id, history_limit)
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+    if mode == "group":
+        print(f"[telegram_bot] streaming group generation chat_id={chat_id} history_turns={len(history)}", flush=True)
+        started_at = time.perf_counter()
+        sent_count = 0
+        async for response_message in lora_bot.stream_group_lines(history):
+            store.append(chat_id, "assistant", response_message)
+            await update.message.reply_text(response_message)
+            sent_count += 1
+            print(
+                f"[telegram_bot] streamed line chat_id={chat_id} line_index={sent_count} text={response_message!r}",
+                flush=True,
+            )
+        duration_s = time.perf_counter() - started_at
+        print(
+            f"[telegram_bot] replied chat_id={chat_id} messages={sent_count} duration_s={duration_s:.2f}",
+            flush=True,
+        )
+        return
+
     print(f"[telegram_bot] generating chat_id={chat_id} history_turns={len(history)}", flush=True)
     started_at = time.perf_counter()
     reply = await lora_bot.generate(history)
     duration_s = time.perf_counter() - started_at
     print(f"[telegram_bot] generated chat_id={chat_id} duration_s={duration_s:.2f} reply={reply!r}", flush=True)
-
-    if mode == "group":
-        response_messages = split_group_messages(reply)
-        for response_message in response_messages:
-            store.append(chat_id, "assistant", response_message)
-            await update.message.reply_text(response_message)
-        print(f"[telegram_bot] replied chat_id={chat_id} messages={len(response_messages)}", flush=True)
-        return
 
     store.append(chat_id, "assistant", reply)
     await update.message.reply_text(reply)
