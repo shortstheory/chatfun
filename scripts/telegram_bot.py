@@ -8,6 +8,7 @@ import asyncio
 import logging
 import os
 import sqlite3
+import time
 from pathlib import Path
 
 import torch
@@ -24,12 +25,18 @@ except ImportError as exc:  # pragma: no cover - import guard for friendlier set
     ) from exc
 
 
-DEFAULT_SYSTEM_PROMPT = (
+DEFAULT_SINGLE_SYSTEM_PROMPT = (
     "You are replying inside Telegram as a single friendly person. "
     "Reply with only one short natural message. "
     "Do not invent other speakers, do not write speaker tags, and do not write a transcript."
 )
+DEFAULT_GROUP_SYSTEM_PROMPT = (
+    "You are simulating a friends group chat. Continue naturally with realistic speaker voices, "
+    "casual tone, and speaker-tagged lines in the format 'Name: message'. "
+    "You may generate multiple lines from different speakers."
+)
 DEFAULT_HISTORY_LIMIT = 24
+LOGGER = logging.getLogger("telegram_bot")
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,8 +61,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--system-prompt",
-        default=DEFAULT_SYSTEM_PROMPT,
-        help="System prompt used for every Telegram reply",
+        default=None,
+        help="Optional custom system prompt override",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["single", "group"],
+        default="single",
+        help="Choose between a one-person Telegram reply and transcript-style group simulation",
     )
     parser.add_argument("--load-in-4bit", action="store_true", help="Force 4-bit loading")
     parser.add_argument("--no-load-in-4bit", action="store_true", help="Disable 4-bit loading")
@@ -87,6 +100,18 @@ def sanitize_reply(text: str) -> str:
 
     reply = " ".join(cleaned_lines).strip()
     return reply or "lol"
+
+
+def sanitize_group_reply(text: str) -> str:
+    cleaned_lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        cleaned_lines.append(line)
+
+    reply = "\n".join(cleaned_lines).strip()
+    return reply or "Arnav: lol"
 
 
 class HistoryStore:
@@ -160,6 +185,7 @@ class LocalLoraBot:
         top_p: float,
         load_in_4bit: bool,
         system_prompt: str,
+        mode: str,
     ) -> None:
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=model_name,
@@ -181,6 +207,7 @@ class LocalLoraBot:
         self.temperature = temperature
         self.top_p = top_p
         self.system_prompt = system_prompt
+        self.mode = mode
         self._lock = asyncio.Lock()
 
     def _generate_sync(self, history: list[tuple[str, str]]) -> str:
@@ -200,6 +227,8 @@ class LocalLoraBot:
             )
 
         decoded = self.tokenizer.decode(outputs[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True)
+        if self.mode == "group":
+            return sanitize_group_reply(decoded)
         return sanitize_reply(decoded)
 
     async def generate(self, history: list[tuple[str, str]]) -> str:
@@ -255,14 +284,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not user_text:
         return
 
+    LOGGER.info("Received message chat_id=%s sender=%s text=%r", chat_id, sender or "unknown", user_text)
     store.append(chat_id, "user", format_user_message(user_text, sender))
     history = store.get_history(chat_id, history_limit)
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+    LOGGER.info("Starting generation chat_id=%s history_turns=%s", chat_id, len(history))
+    started_at = time.perf_counter()
     reply = await lora_bot.generate(history)
+    duration_s = time.perf_counter() - started_at
+    LOGGER.info("Finished generation chat_id=%s duration_s=%.2f reply=%r", chat_id, duration_s, reply)
 
     store.append(chat_id, "assistant", reply)
     await update.message.reply_text(reply)
+    LOGGER.info("Sent reply chat_id=%s", chat_id)
 
 
 def build_application(token: str, store: HistoryStore, lora_bot: LocalLoraBot, history_limit: int) -> Application:
@@ -284,6 +319,14 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("Pass only one of --load-in-4bit or --no-load-in-4bit")
 
 
+def resolve_system_prompt(mode: str, custom_prompt: str | None) -> str:
+    if custom_prompt:
+        return custom_prompt
+    if mode == "group":
+        return DEFAULT_GROUP_SYSTEM_PROMPT
+    return DEFAULT_SINGLE_SYSTEM_PROMPT
+
+
 def main() -> int:
     args = parse_args()
     validate_args(args)
@@ -297,6 +340,7 @@ def main() -> int:
     if args.load_in_4bit:
         load_in_4bit = True
 
+    system_prompt = resolve_system_prompt(args.mode, args.system_prompt)
     store = HistoryStore(Path(args.db_path))
     lora_bot = LocalLoraBot(
         model_name=args.model,
@@ -307,11 +351,12 @@ def main() -> int:
         temperature=args.temperature,
         top_p=args.top_p,
         load_in_4bit=load_in_4bit,
-        system_prompt=args.system_prompt,
+        system_prompt=system_prompt,
+        mode=args.mode,
     )
     application = build_application(args.telegram_token, store, lora_bot, args.history_limit)
 
-    logging.info("Telegram bot is starting in long-polling mode.")
+    LOGGER.info("Telegram bot is starting in long-polling mode with mode=%s.", args.mode)
     application.run_polling(allowed_updates=Update.ALL_TYPES)
     return 0
 

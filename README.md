@@ -133,3 +133,4 @@ Notes:
 - This uses Telegram long polling, so it can run entirely from your desktop with no public webhook.
 - Local chat history is stored in `processed/telegram_bot.sqlite3`.
 - Use `/reset` inside Telegram to clear the saved history for a chat.
+- Add `--mode group` if you want transcript-style multi-speaker group chat simulation instead of a single-person reply.
