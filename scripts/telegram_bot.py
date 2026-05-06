@@ -244,7 +244,7 @@ class LocalLoraBot:
             return sanitize_group_reply(decoded)
         return sanitize_reply(decoded)
 
-    def _stream_group_lines_sync(self, history: list[tuple[str, str]]) -> list[str]:
+    def _stream_group_lines_sync(self, history: list[tuple[str, str]], on_line) -> None:
         messages = build_messages(history, self.system_prompt)
         prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = self.tokenizer([prompt], return_tensors="pt").to(self.device)
@@ -272,7 +272,6 @@ class LocalLoraBot:
         worker = threading.Thread(target=run_generation, daemon=True)
         worker.start()
 
-        emitted_lines: list[str] = []
         pending = ""
         for chunk in streamer:
             pending += chunk
@@ -280,14 +279,15 @@ class LocalLoraBot:
                 raw_line, pending = pending.split("\n", 1)
                 line = sanitize_group_line(raw_line)
                 if line:
-                    emitted_lines.append(line)
+                    on_line(line)
 
         worker.join()
 
         tail = sanitize_group_line(pending)
         if tail:
-            emitted_lines.append(tail)
-        return emitted_lines or ["Arnav: lol"]
+            on_line(tail)
+            return
+        on_line("Arnav: lol")
 
     async def generate(self, history: list[tuple[str, str]]) -> str:
         async with self._lock:
@@ -300,8 +300,10 @@ class LocalLoraBot:
 
             def worker() -> None:
                 try:
-                    for line in self._stream_group_lines_sync(history):
-                        loop.call_soon_threadsafe(queue.put_nowait, line)
+                    self._stream_group_lines_sync(
+                        history,
+                        lambda line: loop.call_soon_threadsafe(queue.put_nowait, line),
+                    )
                 except Exception as exc:  # pragma: no cover - runtime inference errors
                     loop.call_soon_threadsafe(queue.put_nowait, exc)
                 finally:
