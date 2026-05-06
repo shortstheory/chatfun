@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", default="processed/eval_predictions.jsonl", help="Prediction output JSONL")
     parser.add_argument("--max-seq-length", type=int, default=4096, help="Max context length")
     parser.add_argument("--min-new-tokens", type=int, default=0, help="Minimum generated tokens")
-    parser.add_argument("--max-new-tokens", type=int, default=None, help="Optional maximum generated tokens")
+    parser.add_argument("--max-new-tokens", type=int, default=1000, help="Maximum generated tokens")
     parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature (0 = greedy)")
     parser.add_argument("--top-p", type=float, default=1.0, help="Top-p sampling")
     parser.add_argument("--limit", type=int, default=None, help="Only score the first N examples")
