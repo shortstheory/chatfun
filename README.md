@@ -103,3 +103,33 @@ uv run python scripts/train_lora_unsloth.py \
   --wandb-project chatfun-lora \
   --wandb-run-name qwen25-7b-v1
 ```
+
+## 6. Run a local Telegram bot from your desktop
+
+Install bot deps:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-bot.txt
+```
+
+Create a Telegram bot with `@BotFather`, then export the token:
+
+```bash
+export TELEGRAM_BOT_TOKEN=your_bot_token_here
+```
+
+Run the bot with your trained adapter:
+
+```bash
+python3 scripts/telegram_bot.py \
+  --adapter models/qwen25-7b-groupchat-lora/adapter \
+  --model Qwen/Qwen2.5-7B-Instruct \
+  --load-in-4bit
+```
+
+Notes:
+- This uses Telegram long polling, so it can run entirely from your desktop with no public webhook.
+- Local chat history is stored in `processed/telegram_bot.sqlite3`.
+- Use `/reset` inside Telegram to clear the saved history for a chat.
