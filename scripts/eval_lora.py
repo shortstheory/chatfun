@@ -68,6 +68,39 @@ def token_f1(reference: str, prediction: str) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
+def lcs_length(left: list[str], right: list[str]) -> int:
+    if not left or not right:
+        return 0
+
+    prev = [0] * (len(right) + 1)
+    for left_token in left:
+        curr = [0] * (len(right) + 1)
+        for j, right_token in enumerate(right, start=1):
+            if left_token == right_token:
+                curr[j] = prev[j - 1] + 1
+            else:
+                curr[j] = max(prev[j], curr[j - 1])
+        prev = curr
+    return prev[-1]
+
+
+def rouge_l(reference: str, prediction: str) -> float:
+    ref_tokens = tokenize_words(reference)
+    pred_tokens = tokenize_words(prediction)
+    if not ref_tokens and not pred_tokens:
+        return 1.0
+    if not ref_tokens or not pred_tokens:
+        return 0.0
+
+    lcs = lcs_length(ref_tokens, pred_tokens)
+    if lcs == 0:
+        return 0.0
+
+    precision = lcs / len(pred_tokens)
+    recall = lcs / len(ref_tokens)
+    return 2 * precision * recall / (precision + recall)
+
+
 def load_examples(path: Path, limit: int | None) -> list[dict]:
     examples: list[dict] = []
     with path.open("r", encoding="utf-8") as handle:
@@ -158,6 +191,7 @@ def evaluate_examples(
     exact_matches = 0
     exact_matches_normalized = 0
     token_f1_sum = 0.0
+    rouge_l_sum = 0.0
     reference_words = 0
     prediction_words = 0
 
@@ -188,11 +222,13 @@ def evaluate_examples(
             exact_match = prediction == reference
             normalized_exact_match = normalize_text(prediction) == normalize_text(reference)
             token_f1_value = token_f1(reference, prediction)
+            rouge_l_value = rouge_l(reference, prediction)
             if exact_match:
                 exact_matches += 1
             if normalized_exact_match:
                 exact_matches_normalized += 1
             token_f1_sum += token_f1_value
+            rouge_l_sum += rouge_l_value
             reference_words += len(tokenize_words(reference))
             prediction_words += len(tokenize_words(prediction))
 
@@ -203,6 +239,7 @@ def evaluate_examples(
                 "exact_match": exact_match,
                 "normalized_exact_match": normalized_exact_match,
                 "token_f1": token_f1_value,
+                "rouge_l": rouge_l_value,
                 "meta": example.get("meta", {}),
             }
             handle.write(json.dumps(result, ensure_ascii=False) + "\n")
@@ -210,13 +247,15 @@ def evaluate_examples(
                 tqdm.write(
                     f"[{index}/{len(examples)}] "
                     f"norm_em={result['normalized_exact_match']} "
-                    f"token_f1={result['token_f1']:.3f}"
+                    f"token_f1={result['token_f1']:.3f} "
+                    f"rouge_l={result['rouge_l']:.3f}"
                 )
     return {
         "examples": total,
         "exact_match": exact_matches / total,
         "normalized_exact_match": exact_matches_normalized / total,
         "avg_token_f1": token_f1_sum / total,
+        "avg_rouge_l": rouge_l_sum / total,
         "avg_reference_words": reference_words / total,
         "avg_prediction_words": prediction_words / total,
         "predictions_saved_to": str(out_path),
@@ -229,6 +268,7 @@ def print_metrics(metrics: dict) -> None:
     print(f"exact_match={metrics['exact_match']:.4f}")
     print(f"normalized_exact_match={metrics['normalized_exact_match']:.4f}")
     print(f"avg_token_f1={metrics['avg_token_f1']:.4f}")
+    print(f"avg_rouge_l={metrics['avg_rouge_l']:.4f}")
     print(f"avg_reference_words={metrics['avg_reference_words']:.2f}")
     print(f"avg_prediction_words={metrics['avg_prediction_words']:.2f}")
     print(f"predictions_saved_to={metrics['predictions_saved_to']}")
@@ -296,12 +336,13 @@ def main() -> int:
 
         summary_rows.sort(key=lambda row: row["avg_token_f1"], reverse=True)
         print("\nSummary:")
-        print(f"{'rank':<4} {'token_f1':>8} {'norm_em':>8} {'pred_w':>8} target")
-        print("-" * 72)
+        print(f"{'rank':<4} {'token_f1':>8} {'rouge_l':>8} {'norm_em':>8} {'pred_w':>8} target")
+        print("-" * 84)
         for rank, row in enumerate(summary_rows, start=1):
             print(
                 f"{rank:<4} "
                 f"{row['avg_token_f1']:>8.4f} "
+                f"{row['avg_rouge_l']:>8.4f} "
                 f"{row['normalized_exact_match']:>8.4f} "
                 f"{row['avg_prediction_words']:>8.2f} "
                 f"{row['target']}"
