@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import logging
 import os
 import sqlite3
 import time
@@ -36,7 +35,6 @@ DEFAULT_GROUP_SYSTEM_PROMPT = (
     "You may generate multiple lines from different speakers."
 )
 DEFAULT_HISTORY_LIMIT = 24
-LOGGER = logging.getLogger("telegram_bot")
 
 
 def parse_args() -> argparse.Namespace:
@@ -72,7 +70,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--load-in-4bit", action="store_true", help="Force 4-bit loading")
     parser.add_argument("--no-load-in-4bit", action="store_true", help="Disable 4-bit loading")
-    parser.add_argument("--log-level", default="INFO", help="Python logging level")
     return parser.parse_args()
 
 
@@ -112,6 +109,16 @@ def sanitize_group_reply(text: str) -> str:
 
     reply = "\n".join(cleaned_lines).strip()
     return reply or "Arnav: lol"
+
+
+def split_group_messages(reply: str) -> list[str]:
+    messages: list[str] = []
+    for raw_line in reply.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        messages.append(line)
+    return messages or [reply]
 
 
 class HistoryStore:
@@ -277,6 +284,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     store: HistoryStore = context.application.bot_data["history_store"]
     lora_bot: LocalLoraBot = context.application.bot_data["lora_bot"]
     history_limit: int = context.application.bot_data["history_limit"]
+    mode: str = context.application.bot_data["mode"]
 
     chat_id = str(update.effective_chat.id)
     sender = update.effective_user.first_name if update.effective_user else None
@@ -284,27 +292,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not user_text:
         return
 
-    LOGGER.info("Received message chat_id=%s sender=%s text=%r", chat_id, sender or "unknown", user_text)
+    print(f"[telegram_bot] received chat_id={chat_id} sender={sender or 'unknown'} text={user_text!r}", flush=True)
     store.append(chat_id, "user", format_user_message(user_text, sender))
     history = store.get_history(chat_id, history_limit)
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
-    LOGGER.info("Starting generation chat_id=%s history_turns=%s", chat_id, len(history))
+    print(f"[telegram_bot] generating chat_id={chat_id} history_turns={len(history)}", flush=True)
     started_at = time.perf_counter()
     reply = await lora_bot.generate(history)
     duration_s = time.perf_counter() - started_at
-    LOGGER.info("Finished generation chat_id=%s duration_s=%.2f reply=%r", chat_id, duration_s, reply)
+    print(f"[telegram_bot] generated chat_id={chat_id} duration_s={duration_s:.2f} reply={reply!r}", flush=True)
+
+    if mode == "group":
+        response_messages = split_group_messages(reply)
+        for response_message in response_messages:
+            store.append(chat_id, "assistant", response_message)
+            await update.message.reply_text(response_message)
+        print(f"[telegram_bot] replied chat_id={chat_id} messages={len(response_messages)}", flush=True)
+        return
 
     store.append(chat_id, "assistant", reply)
     await update.message.reply_text(reply)
-    LOGGER.info("Sent reply chat_id=%s", chat_id)
+    print(f"[telegram_bot] replied chat_id={chat_id} messages=1", flush=True)
 
 
-def build_application(token: str, store: HistoryStore, lora_bot: LocalLoraBot, history_limit: int) -> Application:
+def build_application(token: str, store: HistoryStore, lora_bot: LocalLoraBot, history_limit: int, mode: str) -> Application:
     application = Application.builder().token(token).build()
     application.bot_data["history_store"] = store
     application.bot_data["lora_bot"] = lora_bot
     application.bot_data["history_limit"] = history_limit
+    application.bot_data["mode"] = mode
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("reset", reset_command))
     application.add_handler(CommandHandler("help", help_command))
@@ -331,11 +348,6 @@ def main() -> int:
     args = parse_args()
     validate_args(args)
 
-    logging.basicConfig(
-        level=getattr(logging, args.log_level.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-
     load_in_4bit = not args.no_load_in_4bit
     if args.load_in_4bit:
         load_in_4bit = True
@@ -354,9 +366,9 @@ def main() -> int:
         system_prompt=system_prompt,
         mode=args.mode,
     )
-    application = build_application(args.telegram_token, store, lora_bot, args.history_limit)
+    application = build_application(args.telegram_token, store, lora_bot, args.history_limit, args.mode)
 
-    LOGGER.info("Telegram bot is starting in long-polling mode with mode=%s.", args.mode)
+    print(f"[telegram_bot] starting long-polling mode={args.mode}", flush=True)
     application.run_polling(allowed_updates=Update.ALL_TYPES)
     return 0
 
