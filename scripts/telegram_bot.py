@@ -323,9 +323,12 @@ class LocalLoraBot:
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None:
         return
-    await update.message.reply_text(
-        "I am running locally from this desktop. Send a message and I will reply using the LoRA model. "
-        "Use /reset to clear our chat history."
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=(
+            "I am running locally from this desktop. Send a message and I will reply using the LoRA model. "
+            "Use /reset to clear our chat history."
+        ),
     )
 
 
@@ -335,17 +338,20 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     store: HistoryStore = context.application.bot_data["history_store"]
     chat_id = str(update.effective_chat.id)
     store.clear(chat_id)
-    await update.message.reply_text("Cleared local chat history for this chat.")
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="Cleared local chat history for this chat.")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None:
         return
-    await update.message.reply_text(
-        "Commands:\n"
-        "/start - intro\n"
-        "/reset - clear saved conversation\n"
-        "/help - show this message"
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=(
+            "Commands:\n"
+            "/start - intro\n"
+            "/reset - clear saved conversation\n"
+            "/help - show this message"
+        ),
     )
 
 
@@ -380,7 +386,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         sent_count = 0
         async for response_message in lora_bot.stream_group_lines(history):
             store.append(chat_id, "assistant", response_message)
-            await update.message.reply_text(response_message)
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=response_message)
             sent_count += 1
             print(
                 f"[telegram_bot] streamed line chat_id={chat_id} line_index={sent_count} text={response_message!r}",
@@ -400,7 +406,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     print(f"[telegram_bot] generated chat_id={chat_id} duration_s={duration_s:.2f} reply={reply!r}", flush=True)
 
     store.append(chat_id, "assistant", reply)
-    await update.message.reply_text(reply)
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=reply)
     print(f"[telegram_bot] replied chat_id={chat_id} messages=1", flush=True)
 
 
