@@ -16,6 +16,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct", help="Base model name")
     p.add_argument("--adapter", required=True, help="Path to LoRA adapter directory")
     p.add_argument("--max-seq-length", type=int, default=4096, help="Max context length")
+    p.add_argument("--min-new-tokens", type=int, default=0, help="Minimum generated tokens before EOS is allowed")
     p.add_argument("--max-new-tokens", type=int, default=220, help="Max generated tokens")
     p.add_argument("--temperature", type=float, default=0.8, help="Sampling temperature")
     p.add_argument("--top-p", type=float, default=0.95, help="Top-p sampling")
@@ -48,7 +49,17 @@ def build_user_prompt(context_lines: list[str], speaker: str | None) -> str:
     )
 
 
-def generate_once(model, tokenizer, context_lines: list[str], speaker: str | None, device: str, max_new_tokens: int, temperature: float, top_p: float) -> str:
+def generate_once(
+    model,
+    tokenizer,
+    context_lines: list[str],
+    speaker: str | None,
+    device: str,
+    min_new_tokens: int,
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+) -> str:
     messages = [
         {
             "role": "system",
@@ -65,6 +76,7 @@ def generate_once(model, tokenizer, context_lines: list[str], speaker: str | Non
     with torch.no_grad():
         out = model.generate(
             **inputs,
+            min_new_tokens=min_new_tokens,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
@@ -123,6 +135,7 @@ def main() -> int:
                 context_lines=context_lines,
                 speaker=current_speaker,
                 device=device,
+                min_new_tokens=args.min_new_tokens,
                 max_new_tokens=args.max_new_tokens,
                 temperature=args.temperature,
                 top_p=args.top_p,
@@ -181,6 +194,7 @@ def main() -> int:
             context_lines=context_lines,
             speaker=current_speaker,
             device=device,
+            min_new_tokens=args.min_new_tokens,
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
             top_p=args.top_p,
