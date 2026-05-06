@@ -158,9 +158,12 @@ def evaluate_examples(
     token_f1_sum = 0.0
     reference_words = 0
     prediction_words = 0
+    total_examples = len(examples)
 
     with out_path.open("w", encoding="utf-8") as handle:
         for index, example in enumerate(examples, start=1):
+            if not verbose:
+                print(f"\rProgress: {index}/{total_examples}", end="", flush=True)
             messages = example["messages"]
             prompt_messages = messages[:-1]
             reference = str(messages[-1].get("content", "")).strip()
@@ -204,6 +207,8 @@ def evaluate_examples(
                     f"token_f1={result['token_f1']:.3f}"
                 )
 
+    if not verbose:
+        print()
     return {
         "examples": total,
         "exact_match": exact_matches / total,
