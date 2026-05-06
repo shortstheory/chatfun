@@ -104,7 +104,25 @@ uv run python scripts/train_lora_unsloth.py \
   --wandb-run-name qwen25-7b-v1
 ```
 
-## 6. Run a local Telegram bot from your desktop
+## 6. Evaluate a trained LoRA on the held-out test set
+
+Run evaluation:
+
+```bash
+python3 scripts/eval_lora.py \
+  --model Qwen/Qwen2.5-7B-Instruct \
+  --adapter models/qwen25-7b-groupchat-lora/adapter \
+  --test datasets/test.jsonl \
+  --out processed/eval_predictions.jsonl \
+  --load-in-4bit
+```
+
+Notes:
+- The script generates from each example's `system` + `user` messages and compares the output to the reference `assistant` content.
+- It reports exact match, normalized exact match, and token-level F1.
+- Add `--limit 20` for a quick smoke test before running the full split.
+
+## 7. Run a local Telegram bot from your desktop
 
 Install bot deps:
 
