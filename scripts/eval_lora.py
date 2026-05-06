@@ -252,8 +252,6 @@ def main() -> int:
         load_in_8bit=False,
         full_finetuning=False,
     )
-    model = PeftModel.from_pretrained(model, args.adapter)
-    FastLanguageModel.for_inference(model)
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
