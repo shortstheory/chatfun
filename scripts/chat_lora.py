@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+from threading import Thread
 from pathlib import Path
 
 import torch
 from peft import PeftModel
+from transformers import TextIteratorStreamer
 from unsloth import FastLanguageModel
 
 
@@ -20,6 +22,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-new-tokens", type=int, default=220, help="Max generated tokens")
     p.add_argument("--temperature", type=float, default=0.8, help="Sampling temperature")
     p.add_argument("--top-p", type=float, default=0.95, help="Top-p sampling")
+    p.add_argument("--stream", action="store_true", help="Stream tokens as they are generated")
     p.add_argument("--speaker", default=None, help="Optional TARGET_SPEAKER value")
     p.add_argument("--context", default=None, help="Optional path to initial transcript text file")
     p.add_argument("--autogen", action="store_true", help="Run automatic generation loop (no interactive input)")
@@ -59,6 +62,7 @@ def generate_once(
     max_new_tokens: int,
     temperature: float,
     top_p: float,
+    stream: bool,
 ) -> str:
     messages = [
         {
@@ -73,18 +77,34 @@ def generate_once(
     prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inputs = tokenizer([prompt], return_tensors="pt").to(device)
 
-    with torch.no_grad():
-        out = model.generate(
-            **inputs,
-            min_new_tokens=min_new_tokens,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            do_sample=True,
-            pad_token_id=tokenizer.eos_token_id,
-        )
+    generate_kwargs = {
+        **inputs,
+        "min_new_tokens": min_new_tokens,
+        "max_new_tokens": max_new_tokens,
+        "temperature": temperature,
+        "top_p": top_p,
+        "do_sample": True,
+        "pad_token_id": tokenizer.eos_token_id,
+    }
 
-    return tokenizer.decode(out[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True).strip()
+    if not stream:
+        with torch.no_grad():
+            out = model.generate(**generate_kwargs)
+        return tokenizer.decode(out[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True).strip()
+
+    streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+    generate_kwargs["streamer"] = streamer
+
+    with torch.no_grad():
+        worker = Thread(target=model.generate, kwargs=generate_kwargs)
+        worker.start()
+        pieces: list[str] = []
+        for piece in streamer:
+            print(piece, end="", flush=True)
+            pieces.append(piece)
+        worker.join()
+    print()
+    return "".join(pieces).strip()
 
 
 def main() -> int:
@@ -139,9 +159,11 @@ def main() -> int:
                 max_new_tokens=args.max_new_tokens,
                 temperature=args.temperature,
                 top_p=args.top_p,
+                stream=args.stream,
             )
             print(f"\n--- Round {idx + 1} ---")
-            print(generated)
+            if not args.stream:
+                print(generated)
 
             new_lines: list[str] = []
             for line in generated.splitlines():
@@ -198,8 +220,10 @@ def main() -> int:
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
             top_p=args.top_p,
+            stream=args.stream,
         )
-        print(generated)
+        if not args.stream:
+            print(generated)
 
         # Keep generated lines as rolling context for future turns.
         for line in generated.splitlines():
