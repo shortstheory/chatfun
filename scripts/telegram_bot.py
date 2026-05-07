@@ -190,6 +190,22 @@ class HistoryStore:
             connection.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
             connection.commit()
 
+    def clear_all(self) -> None:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM messages")
+            connection.commit()
+
+    def list_chat_ids(self) -> list[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT chat_id
+                FROM messages
+                ORDER BY chat_id
+                """
+            ).fetchall()
+        return [row["chat_id"] for row in rows]
+
 
 class LocalLoraBot:
     """Loads the local model once and serves synchronous generations."""
@@ -207,6 +223,8 @@ class LocalLoraBot:
         system_prompt: str,
         mode: str,
     ) -> None:
+        self.model_name = model_name
+        self.adapter_path = adapter_path
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=model_name,
             max_seq_length=max_seq_length,
@@ -356,9 +374,36 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         text=(
             "Commands:\n"
             "/start - intro\n"
+            "/about - show model and adapter\n"
+            "/amnesia - wipe all saved bot memory\n"
             "/reset - clear saved conversation\n"
             "/help - show this message"
         ),
+    )
+
+
+async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None:
+        return
+    model_name: str = context.application.bot_data["model_name"]
+    adapter_path: str = context.application.bot_data["adapter_path"]
+    mode: str = context.application.bot_data["mode"]
+    await send_message_with_retry(
+        context,
+        update.effective_chat.id,
+        f"Model: {model_name}\nAdapter: {adapter_path}\nMode: {mode}",
+    )
+
+
+async def amnesia_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None:
+        return
+    store: HistoryStore = context.application.bot_data["history_store"]
+    store.clear_all()
+    await send_message_with_retry(
+        context,
+        update.effective_chat.id,
+        "Amnesia complete. I cleared my saved SQLite chat history.",
     )
 
 
@@ -380,6 +425,37 @@ async def send_message_with_retry(
             retry_after = float(exc.retry_after)
             print(f"[telegram_bot] flood control hit chat_id={chat_id} retry_after_s={retry_after:.2f}", flush=True)
             await asyncio.sleep(retry_after)
+
+
+async def send_bot_message_with_retry(application: Application, chat_id: int, text: str) -> None:
+    while True:
+        try:
+            await application.bot.send_message(chat_id=chat_id, text=text)
+            return
+        except RetryAfter as exc:
+            retry_after = float(exc.retry_after)
+            print(f"[telegram_bot] flood control hit chat_id={chat_id} retry_after_s={retry_after:.2f}", flush=True)
+            await asyncio.sleep(retry_after)
+
+
+async def announce_known_chats(application: Application, text: str) -> None:
+    store: HistoryStore = application.bot_data["history_store"]
+    chat_ids = store.list_chat_ids()
+    if not chat_ids:
+        return
+    for chat_id in chat_ids:
+        try:
+            await send_bot_message_with_retry(application, int(chat_id), text)
+        except Exception as exc:  # pragma: no cover - notification best effort
+            print(f"[telegram_bot] failed announcement chat_id={chat_id} error={exc!r}", flush=True)
+
+
+async def post_init(application: Application) -> None:
+    await announce_known_chats(application, "Bot is back online.")
+
+
+async def post_shutdown(application: Application) -> None:
+    await announce_known_chats(application, "Bot is shutting down.")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -443,13 +519,23 @@ def build_application(
     mode: str,
     group_send_delay: float,
 ) -> Application:
-    application = Application.builder().token(token).build()
+    application = (
+        Application.builder()
+        .token(token)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
     application.bot_data["history_store"] = store
     application.bot_data["lora_bot"] = lora_bot
     application.bot_data["history_limit"] = history_limit
     application.bot_data["mode"] = mode
     application.bot_data["group_send_delay"] = group_send_delay
+    application.bot_data["model_name"] = lora_bot.model_name
+    application.bot_data["adapter_path"] = lora_bot.adapter_path
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("about", about_command))
+    application.add_handler(CommandHandler("amnesia", amnesia_command))
     application.add_handler(CommandHandler("reset", reset_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
