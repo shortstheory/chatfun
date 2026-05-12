@@ -157,7 +157,7 @@ def main() -> int:
         speaker = rng.choice(speakers)
         messages = build_prompt(context_lines, speaker)
         prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = tokenizer([prompt], return_tensors="pt").to(device)
+        inputs = tokenizer(text=[prompt], return_tensors="pt").to(device)
 
         with torch.no_grad():
             out = model.generate(

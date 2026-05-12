@@ -251,7 +251,7 @@ class LocalLoraBot:
     def _generate_sync(self, history: list[tuple[str, str]]) -> str:
         messages = build_messages(history, self.system_prompt)
         prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = self.tokenizer([prompt], return_tensors="pt").to(self.device)
+        inputs = self.tokenizer(text=[prompt], return_tensors="pt").to(self.device)
 
         with torch.no_grad():
             outputs = self.model.generate(
@@ -272,7 +272,7 @@ class LocalLoraBot:
     def _stream_group_lines_sync(self, history: list[tuple[str, str]], on_line) -> None:
         messages = build_messages(history, self.system_prompt)
         prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = self.tokenizer([prompt], return_tensors="pt").to(self.device)
+        inputs = self.tokenizer(text=[prompt], return_tensors="pt").to(self.device)
         streamer = TextIteratorStreamer(
             self.tokenizer,
             skip_prompt=True,

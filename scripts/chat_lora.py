@@ -75,7 +75,7 @@ def generate_once(
         {"role": "user", "content": build_user_prompt(context_lines, speaker)},
     ]
     prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    inputs = tokenizer([prompt], return_tensors="pt").to(device)
+    inputs = tokenizer(text=[prompt], return_tensors="pt").to(device)
 
     generate_kwargs = {
         **inputs,

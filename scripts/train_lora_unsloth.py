@@ -3,6 +3,7 @@
 
 This avoids TRL SFTTrainer API drift across versions.
 Expected dataset format: JSONL rows with `messages` chat arrays.
+Legacy `text` rows are also supported for older flat-text datasets.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import argparse
 import inspect
 import os
 from pathlib import Path
+from typing import Any
 
 import torch
 from datasets import load_dataset
@@ -98,68 +100,118 @@ def main() -> int:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    def to_text(batch: dict) -> dict:
-        prompt_texts = []
-        full_texts = []
-        for messages in batch["messages"]:
-            prompt_messages = messages[:-1]
-            prompt_texts.append(
-                tokenizer.apply_chat_template(prompt_messages, tokenize=False, add_generation_prompt=True)
-            )
-            full_texts.append(
-                tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-            )
-        return {"prompt_text": prompt_texts, "text": full_texts}
+    def _normalize_token_ids(rendered: Any) -> list[int]:
+        if isinstance(rendered, dict):
+            input_ids = rendered.get("input_ids")
+            if isinstance(input_ids, list) and input_ids and isinstance(input_ids[0], list):
+                return list(input_ids[0])
+            if isinstance(input_ids, list):
+                return list(input_ids)
+            raise ValueError("Chat template returned dict without usable input_ids")
+        if hasattr(rendered, "tolist"):
+            rendered = rendered.tolist()
+        if isinstance(rendered, list) and rendered and isinstance(rendered[0], list):
+            return list(rendered[0])
+        if isinstance(rendered, list):
+            return list(rendered)
+        raise ValueError(f"Unsupported chat template output type: {type(rendered).__name__}")
 
-    text_train = raw["train"].map(
-        to_text,
+    def _validate_message_row(messages: Any, row_index: int) -> list[dict[str, Any]]:
+        if not isinstance(messages, list) or len(messages) < 2:
+            raise ValueError(f"Invalid messages at batch row {row_index}: expected at least 2 messages")
+        if not all(isinstance(message, dict) for message in messages):
+            raise ValueError(f"Invalid messages at batch row {row_index}: each message must be an object")
+        return messages
+
+    def tokenize_messages(batch: dict) -> dict:
+        all_input_ids = []
+        all_attention_masks = []
+        all_labels = []
+
+        for row_index, messages in enumerate(batch["messages"]):
+            messages = _validate_message_row(messages, row_index)
+
+            prompt_messages = messages[:-1]
+            full_ids = _normalize_token_ids(
+                tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=True,
+                    add_generation_prompt=False,
+                )
+            )
+            prompt_ids = _normalize_token_ids(
+                tokenizer.apply_chat_template(
+                    prompt_messages,
+                    tokenize=True,
+                    add_generation_prompt=True,
+                )
+            )
+
+            full_ids = full_ids[: args.max_seq_length]
+            prompt_len = min(len(prompt_ids), len(full_ids), args.max_seq_length)
+            labels = ([-100] * prompt_len) + full_ids[prompt_len:]
+
+            all_input_ids.append(full_ids)
+            all_attention_masks.append([1] * len(full_ids))
+            all_labels.append(labels)
+
+        return {
+            "input_ids": all_input_ids,
+            "attention_mask": all_attention_masks,
+            "labels": all_labels,
+        }
+
+    def tokenize_text(batch: dict) -> dict:
+        text_rows = batch.get("text")
+        if not isinstance(text_rows, list):
+            raise ValueError("Expected batched `text` column to be a list of strings")
+
+        encoded = tokenizer(
+            text=text_rows,
+            truncation=True,
+            max_length=args.max_seq_length,
+            padding=False,
+        )
+        input_ids = [list(ids) for ids in encoded["input_ids"]]
+        attention_masks = [list(mask) for mask in encoded["attention_mask"]]
+        labels = [list(ids) for ids in input_ids]
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_masks,
+            "labels": labels,
+        }
+
+    train_columns = set(raw["train"].column_names)
+    if "messages" in train_columns:
+        tokenize_fn = tokenize_messages
+    elif "text" in train_columns:
+        tokenize_fn = tokenize_text
+    else:
+        raise SystemExit(
+            "Unsupported dataset format. Expected a `messages` column or legacy `text` column, "
+            f"but found: {sorted(train_columns)}"
+        )
+
+    train_ds = raw["train"].map(
+        tokenize_fn,
         batched=True,
         num_proc=args.dataset_num_proc,
         remove_columns=raw["train"].column_names,
     )
 
-    def tokenize_batch(batch: dict) -> dict:
-        full_tokens = tokenizer(
-            batch["text"],
-            truncation=True,
-            max_length=args.max_seq_length,
-            padding=False,
-        )
-        prompt_tokens = tokenizer(
-            batch["prompt_text"],
-            truncation=True,
-            max_length=args.max_seq_length,
-            padding=False,
-        )
-
-        labels = []
-        for input_ids, prompt_ids in zip(full_tokens["input_ids"], prompt_tokens["input_ids"], strict=True):
-            prompt_len = min(len(prompt_ids), len(input_ids))
-            labels.append(([-100] * prompt_len) + input_ids[prompt_len:])
-
-        full_tokens["labels"] = labels
-        return full_tokens
-
-    train_ds = text_train.map(
-        tokenize_batch,
-        batched=True,
-        num_proc=args.dataset_num_proc,
-        remove_columns=text_train.column_names,
-    )
-
     eval_ds = None
     if "validation" in raw:
-        text_eval = raw["validation"].map(
-            to_text,
+        validation_columns = set(raw["validation"].column_names)
+        if validation_columns != train_columns:
+            raise SystemExit(
+                "Train/validation schema mismatch. "
+                f"train={sorted(train_columns)} validation={sorted(validation_columns)}"
+            )
+        eval_ds = raw["validation"].map(
+            tokenize_fn,
             batched=True,
             num_proc=args.dataset_num_proc,
             remove_columns=raw["validation"].column_names,
-        )
-        eval_ds = text_eval.map(
-            tokenize_batch,
-            batched=True,
-            num_proc=args.dataset_num_proc,
-            remove_columns=text_eval.column_names,
         )
 
     report_to = ["wandb"] if args.wandb else []

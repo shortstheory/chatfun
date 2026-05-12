@@ -131,7 +131,7 @@ def generate_prediction(
     top_p: float,
 ) -> str:
     prompt = tokenizer.apply_chat_template(prompt_messages, tokenize=False, add_generation_prompt=True)
-    inputs = tokenizer([prompt], return_tensors="pt").to(device)
+    inputs = tokenizer(text=[prompt], return_tensors="pt").to(device)
 
     generate_kwargs = {
         **inputs,
