@@ -13,11 +13,38 @@ import inspect
 import os
 from pathlib import Path
 from typing import Any
+from dataclasses import dataclass
 
 import torch
 from datasets import load_dataset
-from transformers import DataCollatorForSeq2Seq, Trainer, TrainingArguments, set_seed
+from transformers import Trainer, TrainingArguments, set_seed
 from unsloth import FastLanguageModel
+
+
+@dataclass
+class SupervisedDataCollator:
+    pad_token_id: int
+    label_pad_token_id: int = -100
+
+    def __call__(self, features: list[dict[str, list[int]]]) -> dict[str, torch.Tensor]:
+        max_length = max(len(feature["input_ids"]) for feature in features)
+
+        input_ids = []
+        attention_mask = []
+        labels = []
+        for feature in features:
+            sequence_length = len(feature["input_ids"])
+            pad_length = max_length - sequence_length
+
+            input_ids.append(feature["input_ids"] + ([self.pad_token_id] * pad_length))
+            attention_mask.append(feature["attention_mask"] + ([0] * pad_length))
+            labels.append(feature["labels"] + ([self.label_pad_token_id] * pad_length))
+
+        return {
+            "input_ids": torch.tensor(input_ids, dtype=torch.long),
+            "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
+            "labels": torch.tensor(labels, dtype=torch.long),
+        }
 
 
 def parse_args() -> argparse.Namespace:
@@ -84,6 +111,7 @@ def main() -> int:
         load_in_8bit=False,
         full_finetuning=False,
     )
+    text_tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
 
     model = FastLanguageModel.get_peft_model(
         model,
@@ -97,8 +125,13 @@ def main() -> int:
         max_seq_length=args.max_seq_length,
     )
 
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    if getattr(text_tokenizer, "pad_token", None) is None:
+        text_tokenizer.pad_token = text_tokenizer.eos_token
+    pad_token_id = getattr(text_tokenizer, "pad_token_id", None)
+    if pad_token_id is None:
+        pad_token_id = getattr(text_tokenizer, "eos_token_id", None)
+    if pad_token_id is None:
+        raise SystemExit("Tokenizer is missing both pad_token_id and eos_token_id, so batches cannot be padded.")
 
     def _normalize_token_ids(rendered: Any) -> list[int]:
         if isinstance(rendered, dict):
@@ -261,7 +294,7 @@ def main() -> int:
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=eval_ds,
-        data_collator=DataCollatorForSeq2Seq(tokenizer=tokenizer, model=model, label_pad_token_id=-100),
+        data_collator=SupervisedDataCollator(pad_token_id=pad_token_id, label_pad_token_id=-100),
     )
 
     train_output = trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
