@@ -11,10 +11,9 @@ import threading
 import time
 from pathlib import Path
 
-import torch
-from peft import PeftModel
-from transformers import TextIteratorStreamer
 from unsloth import FastLanguageModel
+import torch
+from transformers import TextIteratorStreamer
 
 try:
     from telegram import Update
@@ -225,14 +224,22 @@ class LocalLoraBot:
     ) -> None:
         self.model_name = model_name
         self.adapter_path = adapter_path
+        adapter_config_path = Path(adapter_path) / "adapter_config.json"
+        if not adapter_config_path.exists():
+            raise FileNotFoundError(
+                f"Adapter config not found at {adapter_config_path}. "
+                "Pass the saved LoRA adapter directory that contains adapter_config.json."
+            )
+        load_target = adapter_path
+
         model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name=model_name,
+            model_name=load_target,
             max_seq_length=max_seq_length,
             load_in_4bit=load_in_4bit,
             load_in_8bit=False,
             full_finetuning=False,
         )
-        self.model = PeftModel.from_pretrained(model, adapter_path)
+        self.model = model
         FastLanguageModel.for_inference(self.model)
 
         self.tokenizer = tokenizer
